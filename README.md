@@ -388,7 +388,7 @@ If you find our work useful, <b>please consider giving a star to this github rep
 ```bib
 @article{tu2024stableanimator,
   title={StableAnimator: High-Quality Identity-Preserving Human Image Animation},
-  author={Shuyuan Tu and Zhen Xing and Xintong Han and Zhi-Qi Cheng and Qi Dai and Chong Luo and Zuxuan Wu},
+  author={Tu, Shuyuan and Xing, Zhen and Han, Xintong and Cheng, Zhi-Qi and Dai, Qi and Luo, Chong and Wu, Zuxuan},
   journal={arXiv preprint arXiv:2411.17697},
   year={2024}
 }
