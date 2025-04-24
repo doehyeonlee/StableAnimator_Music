@@ -129,7 +129,7 @@ class AnimationIDAttnNormalizedProcessor(nn.Module):
             ip_hidden_states = xformers.ops.memory_efficient_attention(query, ip_key, ip_value, attn_bias=None)
             ip_hidden_states = ip_hidden_states.to(query.dtype)
         else:
-            ip_hidden_states = F.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+            ip_hidden_states = F.scaled_dot_product_attention(query, ip_key, ip_value, attn_mask=None, dropout_p=0.0,
                                                               is_causal=False)
             ip_hidden_states = ip_hidden_states.to(query.dtype)
 
