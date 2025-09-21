@@ -386,10 +386,11 @@ Email: francisshuyuan@gmail.com
 
 If you find our work useful, <b>please consider giving a star to this github repository and citing it</b>:
 ```bib
-@article{tu2024stableanimator,
-  title={StableAnimator: High-Quality Identity-Preserving Human Image Animation},
+@inproceedings{tu2025stableanimator,
+  title={Stableanimator: High-quality identity-preserving human image animation},
   author={Tu, Shuyuan and Xing, Zhen and Han, Xintong and Cheng, Zhi-Qi and Dai, Qi and Luo, Chong and Wu, Zuxuan},
-  journal={arXiv preprint arXiv:2411.17697},
-  year={2024}
+  booktitle={Proceedings of the Computer Vision and Pattern Recognition Conference},
+  pages={21096--21106},
+  year={2025}
 }
 ```
