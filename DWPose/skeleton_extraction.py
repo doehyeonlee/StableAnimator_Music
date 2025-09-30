@@ -149,7 +149,8 @@ def get_video_pose(video_path, ref_image_path, poses_folder_path=None):
     detected_poses = []
     files = os.listdir(video_path)
     png_files = [f for f in files if f.endswith('.png')]
-    png_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+    png_files.sort(key=lambda x: int(x.split('.')[0]))
+#    png_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
     for sub_name in png_files:
         sub_driven_image_path = os.path.join(video_path, sub_name)
         driven_image = cv2.imread(sub_driven_image_path)
