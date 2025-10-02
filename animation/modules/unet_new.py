@@ -406,7 +406,87 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             is_mps = sample.device.type == "mps"
             if isinstance(timestep, float):
                 dtype = torch.float32 if is_mps else torch.float64
+            else:def forward(
+            self,
+            sample: torch.FloatTensor,
+            timestep: Union[torch.Tensor, float, int],
+            encoder_hidden_states: torch.Tensor,
+            added_time_ids: torch.Tensor,
+            pose_latents: torch.Tensor = None,
+            image_only_indicator: bool = False,
+            return_dict: bool = True,
+    ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
+        r"""
+        The [`UNetSpatioTemporalConditionModel`] forward method.
+
+        Args:
+            sample (`torch.FloatTensor`):
+                The noisy input tensor with the following shape `(batch, num_frames, channel, height, width)`.
+            timestep (`torch.FloatTensor` or `float` or `int`): The number of timesteps to denoise an input.
+            encoder_hidden_states (`torch.FloatTensor`):
+                The encoder hidden states with shape `(batch, sequence_length, cross_attention_dim)`.
+            added_time_ids: (`torch.FloatTensor`):
+                The additional time ids with shape `(batch, num_additional_ids)`. These are encoded with sinusoidal
+                embeddings and added to the time embeddings.
+            pose_latents: (`torch.FloatTensor`):
+                The additional latents for pose sequences.
+            image_only_indicator (`bool`, *optional*, defaults to `False`):
+                Whether or not training with all images.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~models.unet_slatio_temporal.UNetSpatioTemporalConditionOutput`] 
+                instead of a plain tuple.
+        Returns:
+            [`~models.unet_slatio_temporal.UNetSpatioTemporalConditionOutput`] or `tuple`:
+                If `return_dict` is True, 
+                an [`~models.unet_slatio_temporal.UNetSpatioTemporalConditionOutput`] is returned, 
+                otherwise a `tuple` is returned where the first element is the sample tensor.
+        """
+        # 1. time
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            # This would be a good case for the `match` statement (Python 3.10+)
+            is_mps = sample.device.type == "mps"
+            if isinstance(timestep, float):
+                dtype = torch.float32 if is_mps else torch.float64
             else:
+                dtype = torch.int32 if is_mps else torch.int64
+            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
+        elif len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        batch_size, num_frames = sample.shape[:2]
+        timesteps = timesteps.expand(batch_size)
+
+        t_emb = self.time_proj(timesteps)
+
+        # `Timesteps` does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
+        t_emb = t_emb.to(dtype=sample.dtype)
+
+        emb = self.time_embedding(t_emb)
+
+        time_embeds = self.add_time_proj(added_time_ids.flatten())
+        time_embeds = time_embeds.reshape((batch_size, -1))
+        time_embeds = time_embeds.to(emb.dtype)
+        aug_emb = self.add_embedding(time_embeds)
+        emb = emb + aug_emb
+
+        # Flatten the batch and frames dimensions
+        # sample: [batch, frames, channels, height, width] -> [batch * frames, channels, height, width]
+        sample = sample.flatten(0, 1)
+        # Repeat the embeddings num_video_frames times
+        # emb: [batch, channels] -> [batch * frames, channels]
+        emb = emb.repeat_interleave(num_frames, dim=0)
+        # encoder_hidden_states: [batch, 1, channels] -> [batch * frames, 1, channels]
+        encoder_hidden_states = encoder_hidden_states.repeat_interleave(num_frames, dim=0)
+
+        # 2. pre-process
+        sample = self.conv_in(sample)
+        if pose_latents is not None:
+            sample = sample + pose_latents
                 dtype = torch.int32 if is_mps else torch.int64
             timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
         elif len(timesteps.shape) == 0:

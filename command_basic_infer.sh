@@ -1,7 +1,7 @@
 CUDA_VISIBLE_DEVICES=0 python inference_basic.py \
  --pretrained_model_name_or_path="/root/StableAnimator_Music/checkpoints/stable-video-diffusion-img2vid-xt" \
  --output_dir="/root/basic_infer" \
- --validation_control="/root/dataset/rec/gKR_sBM_cAll_d28_mKR1_ch07.h5" \
+ --validation_music="/root/dataset/rec/gKR_sBM_cAll_d28_mKR1_ch07.h5" \
  --validation_image="/root/dataset/rec/gKR_sBM_cAll_d28_mKR1_ch07/images/0004.png" \
  --width=512 \
  --height=512 \

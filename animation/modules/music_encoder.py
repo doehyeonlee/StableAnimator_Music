@@ -7,20 +7,24 @@ import torch.nn as nn
 import torch.nn.init as init
 from diffusers.models.modeling_utils import ModelMixin
 
-class MusicEncoder(nn.Module):
-    def __init__(self, in_dim=4800, latent_dim=1024):  # cross_attention_dim에 맞춤
+class MusicEncoder(ModelMixin):
+    def __init__(self, indim=4800, hw=64, noise_latent_channels=320):
         super().__init__()
-        self.latent_dim = latent_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, 1024), nn.ReLU(),
-            nn.Linear(1024, 512), nn.ReLU(),
-            nn.Linear(512, latent_dim)
-        )
+        self.hw = hw
+        self.noise_latent_channels = noise_latent_channels
+        self.latent_dim = hw * hw
+
+        # projection to 64x64
+        self.net = nn.Linear(indim, self.latent_dim)
+
+        # 1→noise_latent_channels 채널 확장
+        self.expand = nn.Conv2d(1, noise_latent_channels, kernel_size=3, padding=1)
 
     def forward(self, x):  # (B, T, 4800)
         B, T, F = x.shape
-        z = self.net(x.view(B*T, F)) 
-        z = z.view(B, T, self.latent_dim)  # (B, T, latent_dim)
+        z = self.net(x.view(B*T, F))                      # (B*T, 4096)
+        z = z.view(B*T, 1, self.hw, self.hw)              # (B*T, 1, 64, 64)
+        z = self.expand(z)                                # (B*T, noise_latent_channels, 64, 64)
         return z
 
     @classmethod

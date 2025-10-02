@@ -118,7 +118,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--validation_control",
+        "--validation_music",
         type=str,
         default=None,
         help=(
@@ -313,11 +313,11 @@ if __name__ == "__main__":
     unet.set_attn_processor(attn_procs)
 
     # resume the previous checkpoint
-    if args.posenet_model_name_or_path is not None and args.face_encoder_model_name_or_path is not None and args.unet_model_name_or_path is not None:
+    if args.music_encoder_model_name_or_path is not None and args.face_encoder_model_name_or_path is not None and args.unet_model_name_or_path is not None:
         print("Loading existing posenet weights, face_encoder weights and unet weights.")
         if args.music_encoder_model_name_or_path.endswith(".pth"):
             music_encoder_state_dict = torch.load(args.music_encoder_model_name_or_path, map_location="cpu")
-            music_encoder.load_state_dict(pose_net_state_dict, strict=True)
+            music_encoder.load_state_dict(music_encoder_state_dict, strict=True)
         else:
             print("posenet weights loading fail")
             print(1/0)
@@ -362,7 +362,7 @@ if __name__ == "__main__":
 
     validation_image_path = args.validation_image
     validation_image = Image.open(args.validation_image).convert('RGB')
-    validation_control = load_music(args.validation_music, args.length)
+    validation_music = load_music(args.validation_music, args.length)
 
     num_frames = args.length
     face_model.face_helper.clean_all()

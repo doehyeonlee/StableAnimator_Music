@@ -628,7 +628,8 @@ class InferenceAnimationPipeline(DiffusionPipeline):
                 weight = torch.minimum(weight, 2 - weight)
                 for idx in indices:
                     # classification-free inference
-                    music_latents = self.music_encoder(music[idx, :])
+                    x_music = music[idx, :].unsqueeze(0).to(device, torch.float16)
+                    music_latents = self.music_encoder(x_music)
                     _noise_pred = self.unet(
                         latent_model_input[:1, idx],
                         t,

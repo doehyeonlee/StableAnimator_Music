@@ -1452,8 +1452,7 @@ def main():
                     # print(f"the size of music latents: {music_latents.size()}") # [1, 4, 1024]
                     encoder_hidden_states = torch.cat([
                         encoder_hidden_states,  # (B, 1, 1024) reference
-                        faceid_latents,        # (B, 4, 1024) face (if exists)
-                        music_latents          # (B, 16, 1024) music
+                        faceid_latents        # (B, 4, 1024) face (if exists)
                     ], dim=1)
                     encoder_hidden_states = encoder_hidden_states.to(latents.dtype)
                     inp_noisy_latents = inp_noisy_latents.to(latents.dtype)
@@ -1465,7 +1464,7 @@ def main():
                         timesteps,
                         encoder_hidden_states,  # Music 포함됨
                         added_time_ids=added_time_ids,
-                        pose_latents=None,
+                        pose_latents=music_latents,
                     ).sample
 
                     sigmas = sigmas_reshaped
