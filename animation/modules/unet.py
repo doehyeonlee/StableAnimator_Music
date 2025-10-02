@@ -329,7 +329,9 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         self.set_attn_processor(processor)
 
-    def _set_gradient_checkpointing(self, module, value=False):
+    def _set_gradient_checkpointing(self, module, value=False, enable=None):
+        if enable is not None:
+            module.gradient_checkpointing = True
         if hasattr(module, "gradient_checkpointing"):
             module.gradient_checkpointing = value
 

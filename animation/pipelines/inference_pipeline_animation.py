@@ -86,7 +86,7 @@ class InferenceAnimationPipeline(DiffusionPipeline):
             unet,
             scheduler,
             feature_extractor,
-            pose_net,
+            music_encoder,
             face_encoder,
     ):
         super().__init__()
@@ -97,7 +97,7 @@ class InferenceAnimationPipeline(DiffusionPipeline):
             unet=unet,
             scheduler=scheduler,
             feature_extractor=feature_extractor,
-            pose_net=pose_net,
+            music_encoder=music_encoder,
             face_encoder=face_encoder,
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -363,7 +363,7 @@ class InferenceAnimationPipeline(DiffusionPipeline):
     def __call__(
             self,
             image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
-            image_pose: Union[torch.FloatTensor],
+            music: torch.FloatTensor,
             height: int = 576,
             width: int = 1024,
             num_frames: Optional[int] = None,
@@ -594,19 +594,19 @@ class InferenceAnimationPipeline(DiffusionPipeline):
         if indices[-1][-1] < num_frames - 1:
             indices.append([0, *range(num_frames - tile_size + 1, num_frames)])
 
-        pose_pil_image_list = []
-        for pose in image_pose:
-            pose = torch.from_numpy(np.array(pose)).float()
-            pose = pose / 127.5 - 1
-            pose_pil_image_list.append(pose)
-        pose_pil_image_list = torch.stack(pose_pil_image_list, dim=0)
-        pose_pil_image_list = rearrange(pose_pil_image_list, "f h w c -> f c h w")
+        # pose_pil_image_list = []
+        # for pose in image_pose:
+        #     pose = torch.from_numpy(np.array(pose)).float()
+        #     pose = pose / 127.5 - 1
+        #     pose_pil_image_list.append(pose)
+        # pose_pil_image_list = torch.stack(pose_pil_image_list, dim=0)
+        # pose_pil_image_list = rearrange(pose_pil_image_list, "f h w c -> f c h w")
 
 
         # print(indices)  # [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]]
         # print(pose_pil_image_list.size())  # [16, 3, 512, 512]
 
-        self.pose_net.to(device)
+        self.music_encoder.to(device)
         self.unet.to(device)
 
         with torch.cuda.device(device):
@@ -628,7 +628,7 @@ class InferenceAnimationPipeline(DiffusionPipeline):
                 weight = torch.minimum(weight, 2 - weight)
                 for idx in indices:
                     # classification-free inference
-                    pose_latents = self.pose_net(pose_pil_image_list[idx].to(device=device, dtype=latent_model_input.dtype))
+                    music_latents = self.music_encoder(music[idx, :])
                     _noise_pred = self.unet(
                         latent_model_input[:1, idx],
                         t,
@@ -646,7 +646,7 @@ class InferenceAnimationPipeline(DiffusionPipeline):
                         t,
                         encoder_hidden_states=image_embeddings[1:],
                         added_time_ids=added_time_ids[1:],
-                        pose_latents=pose_latents,
+                        pose_latents=music_latents,
                         image_only_indicator=image_only_indicator,
                         return_dict=False,
                     )[0]

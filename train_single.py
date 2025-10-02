@@ -1,3 +1,16 @@
+from torch.utils.data._utils.collate import default_collate
+
+def safe_collate(batch):
+    good = []
+    for s in batch:
+        if s is None:
+            continue
+        good.append(s)
+    if len(good) == 0:
+        return None
+    return default_collate(good)
+
+
 import argparse
 import random
 import logging
@@ -15,16 +28,15 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from diffusers.models.attention_processor import XFormersAttnProcessor
-
-from animation.dataset.animation_dataset import LargeScaleAnimationVideos
+from animation.dataset.animation_new_dataset import LargeScaleMusicVideos
 from animation.modules.attention_processor import AnimationAttnProcessor
 from animation.modules.attention_processor_normalized import AnimationIDAttnNormalizedProcessor
 from animation.modules.face_model import FaceModel
 from animation.modules.id_encoder import FusionFaceId
 from animation.modules.pose_net import PoseNet
 from animation.modules.unet import UNetSpatioTemporalConditionModel
+from animation.modules.music_encoder import MusicEncoder
 
-from animation.pipelines.validation_pipeline_animation import ValidationAnimationPipeline
 import transformers
 from accelerate import Accelerator, DistributedType
 from accelerate.logging import get_logger
@@ -46,6 +58,7 @@ from diffusers.utils.import_utils import is_xformers_available
 import warnings
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
+
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.24.0.dev0")
@@ -579,6 +592,12 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--music_encoder_model_name_or_path",
+        type=str,
+        default=None,
+        help="Path to pretrained music encoder (.pth)"
+    )
+    parser.add_argument(
         "--mixed_precision",
         type=str,
         default=None,
@@ -936,7 +955,7 @@ def main():
         clip_embeddings_dim=1024,
         num_tokens=4, )
     face_model = FaceModel()
-
+    music_encoder = MusicEncoder()
     # init adapter modules
     lora_rank = 128
     attn_procs = {}
@@ -1129,7 +1148,7 @@ def main():
 
     root_path = args.data_root_path
     txt_path = args.data_path
-    train_dataset = LargeScaleAnimationVideos(
+    train_dataset = LargeScaleMusicVideos(
         root_path=root_path,
         txt_path=txt_path,
         width=args.dataset_width,
@@ -1145,6 +1164,9 @@ def main():
         batch_size=args.per_gpu_batch_size,
         num_workers=args.num_workers,
         shuffle=True,
+        collate_fn=safe_collate,
+        drop_last=True,                        # DDP에서 마지막 배치 불일치 방지
+
     )
 
     # Scheduler and math around the number of training steps.
@@ -1161,10 +1183,10 @@ def main():
         num_training_steps=args.max_train_steps * accelerator.num_processes,
     )
 
-    unet, pose_net, face_encoder, optimizer, lr_scheduler, train_dataloader = accelerator.prepare(
-        unet, pose_net, face_encoder, optimizer, lr_scheduler, train_dataloader
+    unet, music_encoder, face_encoder, optimizer, lr_scheduler, train_dataloader = accelerator.prepare(
+        unet, music_encoder, face_encoder, optimizer, lr_scheduler, train_dataloader
     )
-
+            
     if args.use_ema:
         ema_unet.to(accelerator.device)
 
@@ -1265,20 +1287,49 @@ def main():
                         disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
+
+    # 변경된 unet과 music_encoder 추가해서 train 진행
     for epoch in range(first_epoch, args.num_train_epochs):
-        pose_net.train()
+        
+        # pose_net.train()
         face_encoder.train()
+        music_encoder.train()
         unet.train()
         train_loss = 0.0
 
         for step, batch in enumerate(train_dataloader):
-            # Skip steps until we reach the resumed step
-            if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
-                if step % args.gradient_accumulation_steps == 0:
-                    progress_bar.update(1)
+            if batch is None:
+                if accelerator.is_local_main_process:
+                    print(f"[WARN] Skip batch at step {step} (all samples invalid)")
                 continue
+            
+            # Skip steps until we reach the resumed step
+            if step == 0:  
+                print("="*50)
+                print("DEBUG: First Batch Information")
+                print("="*50)
+                for key, value in batch.items():
+                    if isinstance(value, torch.Tensor):
+                        print(f"{key}: shape={value.shape}, dtype={value.dtype}, "
+                            f"min={value.min():.3f}, max={value.max():.3f}")
+                    else:
+                        print(f"{key}: {type(value)}")
+                
+                # 음악 특징 확인
+                if "music_fea" in batch:
+                    music = batch["music_fea"]
+                    print(f"\nMusic features stats:")
+                    print(f"  Mean: {music.mean():.3f}, Std: {music.std():.3f}")
+                    print(f"  All zeros? {(music == 0).all()}")
+                    print(f"  All same value? {music.std() < 1e-6}")
 
-            with accelerator.accumulate(pose_net, face_encoder, unet):
+
+            # if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+            #     if step % args.gradient_accumulation_steps == 0:
+            #         progress_bar.update(1)
+            #     continue
+
+            with accelerator.accumulate(face_encoder, music_encoder, unet):  # pose_net
                 with accelerator.autocast():
                     pixel_values = batch["pixel_values"].to(weight_dtype).to(
                         accelerator.device, non_blocking=True
@@ -1300,7 +1351,7 @@ def main():
                                                             dtype=conditional_pixel_values.dtype)
                     conditional_latents = tensor_to_vae_latent(conditional_pixel_values, vae, scale=False)
 
-                    # Sample noise that we'll add to the latents
+                    # Samle noise that we'll add to the latents
                     noise = torch.randn_like(latents)
                     bsz = latents.shape[0]
                     # Sample a random timestep for each image
@@ -1363,13 +1414,28 @@ def main():
                     conditional_latents = conditional_latents.unsqueeze(
                         1).repeat(1, noisy_latents.shape[1], 1, 1, 1)
 
-                    pose_pixels = batch["pose_pixels"].to(
+                    #pose_pixels = batch["pose_pixels"].to(
+                    #    dtype=weight_dtype, device=accelerator.device, non_blocking=True
+                    #)
+
+                    faceid_embeds = batch.get("faceid_embeds")
+                    if faceid_embeds is not None and not isinstance(faceid_embeds, type(None)):
+                        faceid_embeds = faceid_embeds.to(
+                            dtype=weight_dtype, device=accelerator.device, non_blocking=True
+                        )
+                    else:
+                        faceid_embeds = None
+                    
+                    tgt_face_masks = batch["tgt_face_masks"].to(
                         dtype=weight_dtype, device=accelerator.device, non_blocking=True
                     )
-                    faceid_embeds = batch["faceid_embeds"].to(
+                
+                    
+                    music_embeds = batch["music_fea"].to(
                         dtype=weight_dtype, device=accelerator.device, non_blocking=True
                     )
-                    pose_latents = pose_net(pose_pixels)
+                    music_latents = music_encoder(music_embeds)
+                    # pose_latents = pose_net(pose_pixels)
 
                     # print("This is faceid_latents calculation")
                     # print(faceid_embeds.size())  # [1, 512]
@@ -1383,17 +1449,23 @@ def main():
 
                     # print(f"the size of encoder_hidden_states: {encoder_hidden_states.size()}") # [1, 1, 1024]
                     # print(f"the size of face latents: {faceid_latents.size()}") # [1, 4, 1024]
-                    encoder_hidden_states = torch.cat([encoder_hidden_states, faceid_latents], dim=1)
-
+                    # print(f"the size of music latents: {music_latents.size()}") # [1, 4, 1024]
+                    encoder_hidden_states = torch.cat([
+                        encoder_hidden_states,  # (B, 1, 1024) reference
+                        faceid_latents,        # (B, 4, 1024) face (if exists)
+                        music_latents          # (B, 16, 1024) music
+                    ], dim=1)
                     encoder_hidden_states = encoder_hidden_states.to(latents.dtype)
                     inp_noisy_latents = inp_noisy_latents.to(latents.dtype)
-                    pose_latents = pose_latents.to(latents.dtype)
+                    #pose_latents = pose_latents.to(latents.dtype)
 
                     # Predict the noise residual
                     model_pred = unet(
-                        inp_noisy_latents, timesteps, encoder_hidden_states,
+                        inp_noisy_latents,
+                        timesteps,
+                        encoder_hidden_states,  # Music 포함됨
                         added_time_ids=added_time_ids,
-                        pose_latents=pose_latents,
+                        pose_latents=None,
                     ).sample
 
                     sigmas = sigmas_reshaped
@@ -1403,13 +1475,16 @@ def main():
                     denoised_latents = model_pred * c_out + c_skip * noisy_latents
                     weighing = (1 + sigmas ** 2) * (sigmas ** -2.0)
 
-                    tgt_face_masks = batch["tgt_face_masks"].to(
-                        dtype=weight_dtype, device=accelerator.device, non_blocking=True
-                    )
-                    tgt_face_masks = rearrange(tgt_face_masks, "b f c h w -> (b f) c h w")
-                    tgt_face_masks = F.interpolate(tgt_face_masks, size=(target.size()[-2], target.size()[-1]),
-                                                   mode='nearest')
-                    tgt_face_masks = rearrange(tgt_face_masks, "(b f) c h w -> b f c h w", f=args.sample_n_frames)
+                    if tgt_face_masks.shape[-2:] != target.shape[-2:]:
+                        b, f = tgt_face_masks.shape[0], tgt_face_masks.shape[1]
+                        tgt_face_masks_flat = tgt_face_masks.reshape(b * f, *tgt_face_masks.shape[2:])
+                        tgt_face_masks_flat = F.interpolate(
+                            tgt_face_masks_flat,
+                            size=target.shape[-2:],
+                            mode='bilinear',
+                            align_corners=False
+                        )
+                        tgt_face_masks = tgt_face_masks_flat.reshape(b, f, *tgt_face_masks_flat.shape[1:])
 
                     # MSE loss
                     loss = torch.mean(
@@ -1477,18 +1552,20 @@ def main():
                         args.output_dir, f"checkpoint-{global_step}")
                     accelerator.save_state(save_path)
                     unwrap_unet = accelerator.unwrap_model(unet)
-                    unwrap_pose_net = accelerator.unwrap_model(pose_net)
+            
                     unwrap_face_encoder = accelerator.unwrap_model(face_encoder)
                     unwrap_unet_state_dict = unwrap_unet.state_dict()
+                    unwrap_music_encoder = accelerator.unwrap_model(music_encoder)
                     torch.save(unwrap_unet_state_dict,
                                os.path.join(args.output_dir, f"checkpoint-{global_step}", f"unet-{global_step}.pth"))
-                    unwrap_pose_net_state_dict = unwrap_pose_net.state_dict()
-                    torch.save(unwrap_pose_net_state_dict, os.path.join(args.output_dir, f"checkpoint-{global_step}",
-                                                                        f"pose_net-{global_step}.pth"))
+                    
                     unwrap_face_encoder_state_dict = unwrap_face_encoder.state_dict()
                     torch.save(unwrap_face_encoder_state_dict,
                                os.path.join(args.output_dir, f"checkpoint-{global_step}",
                                             f"face_encoder-{global_step}.pth"))
+                    torch.save(unwrap_music_encoder.state_dict(),
+                               os.path.join(args.output_dir, f"checkpoint-{global_step}",
+                                            f"music_encoder-{global_step}.pth"))
                     logger.info(f"Saved state to {save_path}")
 
                 if accelerator.is_main_process:
@@ -1503,30 +1580,6 @@ def main():
                             ema_unet.store(unet.parameters())
                             ema_unet.copy_to(unet.parameters())
 
-                        log_validation(
-                            vae=vae,
-                            image_encoder=image_encoder,
-                            unet=unet,
-                            pose_net=pose_net,
-                            face_encoder=face_encoder,
-                            app=face_model.app,
-                            face_helper=face_model.face_helper,
-                            handler_ante=face_model.handler_ante,
-                            scheduler=noise_scheduler,
-                            accelerator=accelerator,
-                            feature_extractor=feature_extractor,
-                            width=512,
-                            height=512,
-                            torch_dtype=weight_dtype,
-                            validation_image_folder=args.validation_image_folder,
-                            validation_image=args.validation_image,
-                            validation_control_folder=args.validation_control_folder,
-                            output_dir=args.output_dir,
-                            generator=generator,
-                            global_step=global_step,
-                            num_validation_cases=1,
-                        )
-
                         if args.use_ema:
                             # Switch back to the original UNet parameters.
                             ema_unet.restore(unet.parameters())
@@ -1534,6 +1587,13 @@ def main():
                         with torch.cuda.device(latents.device):
                             torch.cuda.empty_cache()
 
+            if step == 0 and epoch == 0:
+                print("DEBUG: Batch Data Shapes")
+                for key, value in batch.items():
+                    print(f"{key}: {value.shape}")
+            if step % 10 == 0:
+                print(f"Step {step}, Loss: {loss.item():.4f}")
+        
             logs = {"step_loss": loss.detach().item(
             ), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1548,122 +1608,6 @@ def main():
             args.output_dir, f"checkpoint-last")
         accelerator.save_state(save_path)
         logger.info(f"Saved state to {save_path}")
-
-
-def log_validation(
-        vae,
-        image_encoder,
-        unet,
-        pose_net,
-        face_encoder,
-        app,
-        face_helper,
-        handler_ante,
-        scheduler,
-        accelerator,
-        feature_extractor,
-        width,
-        height,
-        torch_dtype,
-        validation_image_folder,
-        validation_image,
-        validation_control_folder,
-        output_dir,
-        generator,
-        global_step,
-        num_validation_cases=1,
-):
-    logger.info("Running validation... ")
-    validation_unet = accelerator.unwrap_model(unet)
-    validation_image_encoder = accelerator.unwrap_model(image_encoder)
-    validation_vae = accelerator.unwrap_model(vae)
-    validation_pose_net = accelerator.unwrap_model(pose_net)
-    validation_face_encoder = accelerator.unwrap_model(face_encoder)
-
-    pipeline = ValidationAnimationPipeline(
-        vae=validation_vae,
-        image_encoder=validation_image_encoder,
-        unet=validation_unet,
-        scheduler=scheduler,
-        feature_extractor=feature_extractor,
-        pose_net=validation_pose_net,
-        face_encoder=validation_face_encoder,
-    )
-    pipeline = pipeline.to(accelerator.device)
-    validation_images = load_images_from_folder(validation_image_folder)
-    validation_image_path = validation_image
-    if validation_image is None:
-        validation_image = validation_images[0]
-    else:
-        validation_image = Image.open(validation_image).convert('RGB')
-    validation_control_images = load_images_from_folder(validation_control_folder)
-
-    val_save_dir = os.path.join(output_dir, "validation_images")
-    if not os.path.exists(val_save_dir):
-        os.makedirs(val_save_dir)
-
-    with accelerator.autocast():
-        for val_img_idx in range(num_validation_cases):
-            # num_frames = args.num_frames
-            num_frames = len(validation_control_images)
-
-            face_helper.clean_all()
-            validation_face = cv2.imread(validation_image_path)
-            # validation_image_bgr = cv2.cvtColor(validation_face, cv2.COLOR_RGB2BGR)
-            validation_image_face_info = app.get(validation_face)
-            if len(validation_image_face_info) > 0:
-                validation_image_face_info = sorted(validation_image_face_info,
-                                                    key=lambda x: (x['bbox'][2] - x['bbox'][0]) * (
-                                                                x['bbox'][3] - x['bbox'][1]))[-1]
-                validation_image_id_ante_embedding = validation_image_face_info['embedding']
-            else:
-                validation_image_id_ante_embedding = None
-
-            if validation_image_id_ante_embedding is None:
-                face_helper.read_image(validation_face)
-                face_helper.get_face_landmarks_5(only_center_face=True)
-                face_helper.align_warp_face()
-
-                if len(face_helper.cropped_faces) == 0:
-                    validation_image_id_ante_embedding = np.zeros((512,))
-                else:
-                    validation_image_align_face = face_helper.cropped_faces[0]
-                    print('fail to detect face using insightface, extract embedding on align face')
-                    validation_image_id_ante_embedding = handler_ante.get_feat(validation_image_align_face)
-
-            video_frames = pipeline(
-                image=validation_image,
-                image_pose=validation_control_images,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                tile_size=num_frames,
-                tile_overlap=4,
-                decode_chunk_size=4,
-                motion_bucket_id=127.,
-                fps=7,
-                min_guidance_scale=3,
-                max_guidance_scale=3,
-                noise_aug_strength=0.02,
-                num_inference_steps=25,
-                generator=generator,
-                output_type="pil",
-                validation_image_id_ante_embedding=validation_image_id_ante_embedding,
-            ).frames[0]
-            # save_combined_frames(video_frames, validation_images, validation_control_images, val_save_dir)
-
-            out_file = os.path.join(
-                val_save_dir,
-                f"step_{global_step}_val_img_{val_img_idx}.mp4",
-            )
-            # print(video_frames.size()) # [16, 3, 512, 512]
-            for i in range(num_frames):
-                img = video_frames[i]
-                video_frames[i] = np.array(img)
-            export_to_gif(video_frames, out_file, 8)
-
-    del pipeline
-    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

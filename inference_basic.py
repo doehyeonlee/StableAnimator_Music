@@ -15,8 +15,9 @@ from animation.modules.id_encoder import FusionFaceId
 from animation.modules.pose_net import PoseNet
 from animation.modules.unet import UNetSpatioTemporalConditionModel
 from animation.pipelines.inference_pipeline_animation import InferenceAnimationPipeline
+from animation.modules.music_encoder import MusicEncoder
 import random
-
+import h5py
 def seed_everything(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -35,6 +36,23 @@ def load_images_from_folder(folder, width, height):
         images.append(img)
 
     return images
+
+def load_music(filename, length):
+
+    with h5py.File(filename, "r") as f:
+        m = f["music"][:]
+        # Shape 정리
+        if m.ndim == 3 and m.shape[0] == 1:
+            m = m.squeeze(0)  # (1, T, 4800) -> (T, 4800)
+        
+        if m.ndim == 2:
+            # (T, 4800) 형태가 되도록 확인
+            if m.shape[1] != 4800 and m.shape[0] == 4800:
+                m = m.T  # (4800, T) -> (T, 4800)
+            # (720, 4800) 형태라면 그대로 유지 (시간축이 720)
+        
+        music_fea = torch.from_numpy(m).float()
+    return music_fea[:length, :]
 
 def save_frames_as_png(frames, output_path):
     pil_frames = [Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame for frame in frames]
@@ -100,11 +118,11 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--validation_control_folder",
+        "--validation_control",
         type=str,
         default=None,
         help=(
-            "the validation control image"
+            "the validation control music"
         ),
     )
 
@@ -118,7 +136,7 @@ def parse_args():
     parser.add_argument(
         "--height",
         type=int,
-        default=768,
+        default=512,
         required=False
     )
 
@@ -126,6 +144,13 @@ def parse_args():
         "--width",
         type=int,
         default=512,
+        required=False
+    )
+    
+    parser.add_argument(
+        "--length",
+        type=int,
+        default=16,
         required=False
     )
 
@@ -144,7 +169,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--posenet_model_name_or_path",
+        "--music_encoder_model_name_or_path",
         type=str,
         default=None,
         help="Path to pretrained posenet model",
@@ -182,6 +207,7 @@ def parse_args():
         default=0.0,  # or set to 0.02
         required=False
     )
+
     parser.add_argument(
         "--frames_overlap",
         type=int,
@@ -233,7 +259,8 @@ if __name__ == "__main__":
         subfolder="unet",
         low_cpu_mem_usage=True,
     )
-    pose_net = PoseNet(noise_latent_channels=unet.config.block_out_channels[0])
+
+    music_encoder = MusicEncoder()
     face_encoder = FusionFaceId(
         cross_attention_dim=1024,
         id_embeddings_dim=512,
@@ -288,9 +315,9 @@ if __name__ == "__main__":
     # resume the previous checkpoint
     if args.posenet_model_name_or_path is not None and args.face_encoder_model_name_or_path is not None and args.unet_model_name_or_path is not None:
         print("Loading existing posenet weights, face_encoder weights and unet weights.")
-        if args.posenet_model_name_or_path.endswith(".pth"):
-            pose_net_state_dict = torch.load(args.posenet_model_name_or_path, map_location="cpu")
-            pose_net.load_state_dict(pose_net_state_dict, strict=True)
+        if args.music_encoder_model_name_or_path.endswith(".pth"):
+            music_encoder_state_dict = torch.load(args.music_encoder_model_name_or_path, map_location="cpu")
+            music_encoder.load_state_dict(pose_net_state_dict, strict=True)
         else:
             print("posenet weights loading fail")
             print(1/0)
@@ -311,7 +338,7 @@ if __name__ == "__main__":
     vae.requires_grad_(False)
     image_encoder.requires_grad_(False)
     unet.requires_grad_(False)
-    pose_net.requires_grad_(False)
+    music_encoder.requires_grad_(False)
     face_encoder.requires_grad_(False)
 
     if args.gradient_checkpointing:
@@ -327,7 +354,7 @@ if __name__ == "__main__":
         unet=unet,
         scheduler=noise_scheduler,
         feature_extractor=feature_extractor,
-        pose_net=pose_net,
+        music_encoder=music_encoder,
         face_encoder=face_encoder,
     ).to(device='cuda', dtype=weight_dtype)
 
@@ -335,9 +362,9 @@ if __name__ == "__main__":
 
     validation_image_path = args.validation_image
     validation_image = Image.open(args.validation_image).convert('RGB')
-    validation_control_images = load_images_from_folder(args.validation_control_folder, width=args.width, height=args.height)
+    validation_control = load_music(args.validation_music, args.length)
 
-    num_frames = len(validation_control_images)
+    num_frames = args.length
     face_model.face_helper.clean_all()
     validation_face = cv2.imread(validation_image_path)
     validation_image_bgr = cv2.cvtColor(validation_face, cv2.COLOR_RGB2BGR)
@@ -365,7 +392,7 @@ if __name__ == "__main__":
     decode_chunk_size = args.decode_chunk_size
     video_frames = pipeline(
         image=validation_image,
-        image_pose=validation_control_images,
+        music=validation_music,
         height=args.height,
         width=args.width,
         num_frames=num_frames,
