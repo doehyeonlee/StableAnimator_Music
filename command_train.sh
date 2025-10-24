@@ -20,4 +20,4 @@ CUDA_VISIBLE_DEVICES=0,1 accelerate launch /root/StableAnimator_Music/train_sing
  --validation_steps=500 \
  --checkpoints_total_limit=5000 \
  --resume_from_checkpoint="latest" \
- --max_train_steps=30000
+ --max_train_steps=80000

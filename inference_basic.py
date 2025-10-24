@@ -38,7 +38,6 @@ def load_images_from_folder(folder, width, height):
     return images
 
 def load_music(filename, length):
-
     with h5py.File(filename, "r") as f:
         m = f["music"][:]
         # Shape 정리
@@ -49,10 +48,22 @@ def load_music(filename, length):
             # (T, 4800) 형태가 되도록 확인
             if m.shape[1] != 4800 and m.shape[0] == 4800:
                 m = m.T  # (4800, T) -> (T, 4800)
-            # (720, 4800) 형태라면 그대로 유지 (시간축이 720)
-        
+
         music_fea = torch.from_numpy(m).float()
-    return music_fea[:length, :]
+    
+    T = music_fea.shape[0]
+
+    if T <= length:
+        # 길이가 부족하면 앞에서부터 잘라내거나 padding 필요
+        start = 0
+    else:
+        # 1/4 ~ 3/4 구간에서 랜덤 시작점 선택
+        quarter = T // 4
+        min_start = quarter
+        max_start = 3 * T // 4
+    
+    return music_fea[:, :]
+
 
 def save_frames_as_png(frames, output_path):
     pil_frames = [Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame for frame in frames]
@@ -360,68 +371,76 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    validation_image_path = args.validation_image
-    validation_image = Image.open(args.validation_image).convert('RGB')
-    validation_music = load_music(args.validation_music, args.length)
+    mudic = {'/root/aist_hdf5/rec/gJS_sBM_cAll_d01_mJS0_ch07.h5' : 'Street Jazz',
+                '/root/aist_hdf5/rec/gKR_sBM_cAll_d29_mKR0_ch08.h5' : 'Krump',
+                '/root/aist_hdf5/rec/gLH_sBM_cAll_d16_mLH0_ch09.h5' : 'LA HipHop',
+                '/root/aist_hdf5/rec/gLO_sBM_cAll_d13_mLO0_ch03.h5' : 'Lock',
+                '/root/aist_hdf5/rec/gMH_sBM_cAll_d23_mMH1_ch03.h5' : 'Middle HipHop',
+                '/root/aist_hdf5/rec/gPO_sBM_cAll_d10_mPO0_ch03.h5' : 'Pop'}
 
-    num_frames = args.length
-    face_model.face_helper.clean_all()
-    validation_face = cv2.imread(validation_image_path)
-    validation_image_bgr = cv2.cvtColor(validation_face, cv2.COLOR_RGB2BGR)
-    validation_image_face_info = face_model.app.get(validation_image_bgr)
-    if len(validation_image_face_info) > 0:
-        validation_image_face_info = sorted(validation_image_face_info, key=lambda x: (x['bbox'][2] - x['bbox'][0]) * (x['bbox'][3] - x['bbox'][1]))[-1]
-        validation_image_id_ante_embedding = validation_image_face_info['embedding']
-    else:
-        validation_image_id_ante_embedding = None
+    for mu in mudic.keys():
+        validation_image_path = args.validation_image
+        validation_image = Image.open(args.validation_image).convert('RGB')
+        validation_music = load_music(mu, args.length)
 
-    if validation_image_id_ante_embedding is None:
-        face_model.face_helper.read_image(validation_image_bgr)
-        face_model.face_helper.get_face_landmarks_5(only_center_face=True)
-        face_model.face_helper.align_warp_face()
-
-        if len(face_model.face_helper.cropped_faces) == 0:
-            validation_image_id_ante_embedding = np.zeros((512,))
+        num_frames = validation_music.shape[0]
+        face_model.face_helper.clean_all()
+        validation_face = cv2.imread(validation_image_path)
+        validation_image_bgr = cv2.cvtColor(validation_face, cv2.COLOR_RGB2BGR)
+        validation_image_face_info = face_model.app.get(validation_image_bgr)
+        if len(validation_image_face_info) > 0:
+            validation_image_face_info = sorted(validation_image_face_info, key=lambda x: (x['bbox'][2] - x['bbox'][0]) * (x['bbox'][3] - x['bbox'][1]))[-1]
+            validation_image_id_ante_embedding = validation_image_face_info['embedding']
         else:
-            validation_image_align_face = face_model.face_helper.cropped_faces[0]
-            print('fail to detect face using insightface, extract embedding on align face')
-            validation_image_id_ante_embedding = face_model.handler_ante.get_feat(validation_image_align_face)
+            validation_image_id_ante_embedding = None
 
-    # generator = torch.Generator(device=accelerator.device).manual_seed(23123134)
+        if validation_image_id_ante_embedding is None:
+            face_model.face_helper.read_image(validation_image_bgr)
+            face_model.face_helper.get_face_landmarks_5(only_center_face=True)
+            face_model.face_helper.align_warp_face()
 
-    decode_chunk_size = args.decode_chunk_size
-    video_frames = pipeline(
-        image=validation_image,
-        music=validation_music,
-        height=args.height,
-        width=args.width,
-        num_frames=num_frames,
-        tile_size=args.tile_size,
-        tile_overlap=args.frames_overlap,
-        decode_chunk_size=decode_chunk_size,
-        motion_bucket_id=127.,
-        fps=7,
-        min_guidance_scale=args.guidance_scale,
-        max_guidance_scale=args.guidance_scale,
-        noise_aug_strength=args.noise_aug_strength,
-        num_inference_steps=args.num_inference_steps,
-        generator=generator,
-        output_type="pil",
-        validation_image_id_ante_embedding=validation_image_id_ante_embedding,
-    ).frames[0]
+            if len(face_model.face_helper.cropped_faces) == 0:
+                validation_image_id_ante_embedding = np.zeros((512,))
+            else:
+                validation_image_align_face = face_model.face_helper.cropped_faces[0]
+                print('fail to detect face using insightface, extract embedding on align face')
+                validation_image_id_ante_embedding = face_model.handler_ante.get_feat(validation_image_align_face)
 
-    out_file = os.path.join(
-        args.output_dir,
-        f"animation_video.mp4",
-    )
-    for i in range(num_frames):
-        img = video_frames[i]
-        video_frames[i] = np.array(img)
+        # generator = torch.Generator(device=accelerator.device).manual_seed(23123134)
 
-    png_out_file = os.path.join(args.output_dir, "animated_images")
-    os.makedirs(png_out_file, exist_ok=True)
-    export_to_gif(video_frames, out_file, 8)
-    save_frames_as_png(video_frames, png_out_file)
+        decode_chunk_size = args.decode_chunk_size
+        video_frames = pipeline(
+            image=validation_image,
+            music=validation_music,
+            height=args.height,
+            width=args.width,
+            num_frames=num_frames,
+            tile_size=args.tile_size,
+            tile_overlap=args.frames_overlap,
+            decode_chunk_size=decode_chunk_size,
+            motion_bucket_id=127.,
+            fps=7,
+            min_guidance_scale=args.guidance_scale,
+            max_guidance_scale=args.guidance_scale,
+            noise_aug_strength=args.noise_aug_strength,
+            num_inference_steps=args.num_inference_steps,
+            generator=generator,
+            output_type="pil",
+            validation_image_id_ante_embedding=validation_image_id_ante_embedding,
+        ).frames[0]
+
+        out_file = os.path.join(
+            args.output_dir,
+            f"{mudic[mu]}.mp4",
+        )
+        for i in range(num_frames):
+            img = video_frames[i]
+            video_frames[i] = np.array(img)
+
+        png_out_file = os.path.join(args.output_dir, f"{mudic[mu]}")
+        os.makedirs(png_out_file, exist_ok=True)
+        export_to_gif(video_frames, out_file, 60)
+        save_frames_as_png(video_frames, png_out_file)
 
 
 # bash command_basic_infer.sh

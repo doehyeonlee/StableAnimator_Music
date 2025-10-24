@@ -1101,7 +1101,7 @@ def main():
 
     parameters_list = []
 
-    for name, para in pose_net.named_parameters():
+    for para in music_encoder.parameters():
         para.requires_grad = True
         parameters_list.append({"params": para, "lr": args.learning_rate})
 
@@ -1271,6 +1271,14 @@ def main():
             accelerator.print(
                 f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
             )
+            
+            music_state = torch.load("/root/musicenc_final.pt", map_location="cpu")["model_state"]
+
+            # 이미 prepare() 된 모델이라면 unwrap 후 로드
+            accelerator.unwrap_model(music_encoder).load_state_dict(music_state, strict=True)
+
+            # 혹시를 위해 동기화
+            accelerator.wait_for_everyone()
             args.resume_from_checkpoint = None
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
